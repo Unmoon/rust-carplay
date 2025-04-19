@@ -1,0 +1,23 @@
+[package]
+name = "rust-carplay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nusb = "0.1.13"
+log = "0.4.27"
+test-log = "0.2.17"
+byteorder = "1.5.0"
+serde = { version = "1.0.219", features = ["derive"] }
+lazy_static = "1.5.0"
+serde_json = "1.0.140"
+base64 = "0.22.1"
+tokio = { version = "1.44.2", features = ["full"] }
+thiserror = "2.0.12"
+futures = "0.3.31"
+futures-lite = "2.6.0"
+
+gstreamer = "0.23.5"
+gstreamer-audio = "0.23.5"
+gstreamer-app = "0.23.5"
+byte-slice-cast = "1"
