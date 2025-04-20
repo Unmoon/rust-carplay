@@ -240,7 +240,6 @@ impl DongleDriver {
         tokio::spawn(async move {
             let tx = message_tx.clone();
             let mut file = OpenOptions::new()
-                .read(true)
                 .write(true)
                 .create(true)
                 .open("foo.mp4")
@@ -279,6 +278,7 @@ impl DongleDriver {
 
                         if header.msg_type == VideoData {
                             file.write(&*extra_data.clone().unwrap()).unwrap();
+                            file.write("\n".as_ref()).unwrap();
                         }
                         let message = header.to_message(extra_data).unwrap();
                         tx.send(*message).unwrap();

@@ -16,11 +16,9 @@ use crate::readable::ReadableMessage;
 use crate::sendable::{SendTouch, SendableMessage, TouchAction};
 use gstreamer::glib::SourceId;
 use gstreamer_app::prelude::ObjectExt;
-use gtk::gdk::Paintable;
-use gtk::prelude::{
-    ApplicationExt, ApplicationExtManual, BoxExt, GestureSingleExt, GtkWindowExt, WidgetExt,
-};
+use gtk::prelude::{ApplicationExt, ApplicationExtManual, BoxExt, GtkWindowExt, WidgetExt};
 use gtk::{Application, ApplicationWindow, Orientation};
+use log::info;
 use tokio::sync::mpsc;
 
 mod commands;
@@ -84,15 +82,17 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
         .name("video_queue")
         .build()
         .unwrap();
-    let sink = ElementFactory::make("gtk4paintablesink").build().unwrap();
-    let gtk4paintablesink = sink
+
+    let gtk4paintablesink = ElementFactory::make("gtk4paintablesink")
+        .build()
+        .unwrap()
         .dynamic_cast::<PaintableSink>()
         .expect("Sink element is expected to be a Gtk4PaintableSink!");
 
-    let paintable = gtk4paintablesink.property::<Paintable>("paintable");
-    let image = gtk::Picture::for_paintable(&paintable);
     let video_box = gtk::Box::new(Orientation::Vertical, 0);
-    video_box.append(&image);
+
+    let gst_widget = gstgtk4::RenderWidget::new(gtk4paintablesink.as_ref());
+    video_box.append(&gst_widget);
 
     appsrc.set_property("stream-type", gstreamer_app::AppStreamType::Stream);
     appsrc.set_property("is-live", true);
@@ -120,7 +120,6 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
     .unwrap();
 
     let data: Arc<Mutex<CustomData>> = Arc::new(Mutex::new(CustomData::new(&appsrc, tx.clone())));
-
     let data_weak = Arc::downgrade(&data);
     let data_weak2 = Arc::downgrade(&data);
 
@@ -190,7 +189,6 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
     let dongle_tx_clone = dongle_tx.clone();
     let data_weak = Arc::downgrade(&mouse_data);
     motion_controller.connect_motion(move |_controller, x, y| {
-        println!("in connect_motion");
         let Some(data) = data_weak.upgrade() else {
             return;
         };
@@ -200,12 +198,12 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
             d.mouse_y = (y / 1080.0) as f32;
             let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Move);
             dongle_tx_clone.try_send(Box::new(message)).unwrap();
-            println!("Mouse moved to ({}, {})", x, y);
         }
     });
     let dongle_tx_clone = dongle_tx.clone();
     let data_weak = Arc::downgrade(&mouse_data);
     motion_controller.connect_leave(move |_controller| {
+        info!("Moved");
         let Some(data) = data_weak.upgrade() else {
             return;
         };
@@ -213,14 +211,13 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
         d.mouse_down = false;
         let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
         dongle_tx_clone.try_send(Box::new(message)).unwrap();
-        println!("Mouse left");
     });
     video_box.add_controller(motion_controller);
     let click_controller = gtk::GestureClick::new();
     let dongle_tx_clone = dongle_tx.clone();
     let data_weak = Arc::downgrade(&mouse_data);
-    click_controller.connect_pressed(move |gesture, _n_press, x, y| {
-        println!("in connect_pressed");
+    click_controller.connect_pressed(move |_gesture, _n_press, x, y| {
+        info!("Pressed");
         let Some(data) = data_weak.upgrade() else {
             return;
         };
@@ -230,17 +227,11 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
         d.mouse_y = (y / 1080.0) as f32;
         let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Down);
         dongle_tx_clone.try_send(Box::new(message)).unwrap();
-        println!(
-            "Mouse button {} pressed at ({}, {})",
-            gesture.current_button(),
-            x,
-            y
-        );
     });
     let dongle_tx_clone = dongle_tx.clone();
     let data_weak = Arc::downgrade(&mouse_data);
-    click_controller.connect_released(move |gesture, _n_press, x, y| {
-        println!("in connect_released");
+    click_controller.connect_released(move |_gesture, _n_press, x, y| {
+        info!("Released");
         let Some(data) = data_weak.upgrade() else {
             return;
         };
@@ -250,12 +241,6 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
         d.mouse_y = (y / 1080.0) as f32;
         let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
         dongle_tx_clone.try_send(Box::new(message)).unwrap();
-        println!(
-            "Mouse button {} released at ({}, {})",
-            gesture.current_button(),
-            x,
-            y
-        );
     });
     video_box.add_controller(click_controller);
 
