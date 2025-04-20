@@ -21,3 +21,5 @@ gstreamer = "0.23.5"
 gstreamer-audio = "0.23.5"
 gstreamer-app = "0.23.5"
 byte-slice-cast = "1"
+gtk = { version = "0.9.6", package = "gtk4", features = ["v4_6"] }
+gst-plugin-gtk4 = "0.13.5"

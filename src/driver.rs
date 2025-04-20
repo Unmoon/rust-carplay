@@ -147,8 +147,10 @@ pub struct DongleDriver {
 }
 
 impl DongleDriver {
-    pub fn new() -> Self {
-        let (message_tx, message_rx) = mpsc::channel(32);
+    pub fn new(
+        tx: mpsc::Sender<Box<dyn SendableMessage + Send>>,
+        rx: mpsc::Receiver<Box<dyn SendableMessage + Send>>,
+    ) -> Self {
         Self {
             device: None,
             interface: None,
@@ -157,8 +159,8 @@ impl DongleDriver {
             error_count: Arc::new(Mutex::new(0)),
             max_error_count: 5,
             heartbeat_handle: None,
-            message_tx,
-            message_rx,
+            message_tx: tx,
+            message_rx: rx,
         }
     }
 

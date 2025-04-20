@@ -3,8 +3,9 @@
 use crate::driver::{DongleConfig, DongleDriver};
 use crate::message::Message;
 use futures::executor::block_on;
-use gstreamer::glib;
+use gstgtk4::PaintableSink;
 use gstreamer::prelude::{Cast, ElementExt, GstBinExtManual};
+use gstreamer::{ElementFactory, glib};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
@@ -12,9 +13,15 @@ use test_log::env_logger;
 use tokio::sync::broadcast::{Receiver, Sender, channel};
 
 use crate::readable::ReadableMessage;
+use crate::sendable::{SendTouch, SendableMessage, TouchAction};
 use gstreamer::glib::SourceId;
 use gstreamer_app::prelude::ObjectExt;
-use log::error;
+use gtk::gdk::Paintable;
+use gtk::prelude::{
+    ApplicationExt, ApplicationExtManual, BoxExt, GestureSingleExt, GtkWindowExt, WidgetExt,
+};
+use gtk::{Application, ApplicationWindow, Orientation};
+use tokio::sync::mpsc;
 
 mod commands;
 mod driver;
@@ -23,8 +30,12 @@ mod messagetypes;
 mod readable;
 mod sendable;
 
-async fn setup_dongle(tx: Sender<Message>) {
-    let mut dongle = DongleDriver::new();
+async fn setup_dongle(
+    tx: Sender<Message>,
+    dongle_tx: mpsc::Sender<Box<dyn SendableMessage + Send>>,
+    dongle_rx: mpsc::Receiver<Box<dyn SendableMessage + Send>>,
+) {
+    let mut dongle = DongleDriver::new(dongle_tx, dongle_rx);
     let config = DongleConfig {
         android_work_mode: Some(false),
         box_name: String::from("test"),
@@ -44,17 +55,17 @@ pub async fn main() {
     env_logger::init();
 
     let (tx, _) = channel(64);
+    let (dongle_tx, dongle_rx) = mpsc::channel(32);
 
-    tokio::spawn(streamer(tx.clone()));
+    tokio::spawn(streamer(tx.clone(), dongle_tx.clone()));
 
-    setup_dongle(tx.clone()).await;
+    setup_dongle(tx.clone(), dongle_tx, dongle_rx).await;
 }
 
-async fn streamer(tx: Sender<Message>) {
-    if let Err(err) = gstreamer::init() {
-        error!("Failed to initialize gstreamer: {err}");
-        return;
-    }
+async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableMessage + Send>>) {
+    gstreamer::init().unwrap();
+    gtk::init().unwrap();
+    gstgtk4::plugin_register_static().expect("Failed to register gstgtk4 plugin");
 
     let appsrc = gstreamer_app::AppSrc::builder()
         .name("video_source")
@@ -69,11 +80,19 @@ async fn streamer(tx: Sender<Message>) {
         .name("video_convert")
         .build()
         .unwrap();
-    let video_sink = gstreamer::ElementFactory::make("autovideosink")
-        .property("sync", false)
+    let video_queue = gstreamer::ElementFactory::make("queue")
+        .name("video_queue")
         .build()
         .unwrap();
-    let appsink = gstreamer_app::AppSink::builder().name("app_sink").build();
+    let sink = ElementFactory::make("gtk4paintablesink").build().unwrap();
+    let gtk4paintablesink = sink
+        .dynamic_cast::<PaintableSink>()
+        .expect("Sink element is expected to be a Gtk4PaintableSink!");
+
+    let paintable = gtk4paintablesink.property::<Paintable>("paintable");
+    let image = gtk::Picture::for_paintable(&paintable);
+    let video_box = gtk::Box::new(Orientation::Vertical, 0);
+    video_box.append(&image);
 
     appsrc.set_property("stream-type", gstreamer_app::AppStreamType::Stream);
     appsrc.set_property("is-live", true);
@@ -85,8 +104,8 @@ async fn streamer(tx: Sender<Message>) {
             &parser,
             &decoder,
             &video_convert,
-            &video_sink,
-            appsink.upcast_ref(),
+            &video_queue,
+            (&gtk4paintablesink).as_ref(),
         ])
         .unwrap();
 
@@ -95,12 +114,12 @@ async fn streamer(tx: Sender<Message>) {
         &parser,
         &decoder,
         &video_convert,
-        &video_sink,
+        &video_queue,
+        (&gtk4paintablesink).as_ref(),
     ])
     .unwrap();
 
-    let data: Arc<Mutex<CustomData>> =
-        Arc::new(Mutex::new(CustomData::new(&appsrc, &appsink, tx.clone())));
+    let data: Arc<Mutex<CustomData>> = Arc::new(Mutex::new(CustomData::new(&appsrc, tx.clone())));
 
     let data_weak = Arc::downgrade(&data);
     let data_weak2 = Arc::downgrade(&data);
@@ -113,7 +132,6 @@ async fn streamer(tx: Sender<Message>) {
                 };
                 let mut d = data.lock().unwrap();
                 let mut rx = d.tx.subscribe();
-                let video_sink = video_sink.clone();
 
                 if d.source_id.is_none() {
                     let data_weak = Arc::downgrade(&data);
@@ -145,7 +163,6 @@ async fn streamer(tx: Sender<Message>) {
                         };
 
                         let ok = appsrc.push_buffer(buffer).is_ok();
-                        video_sink.set_state(gstreamer::State::Playing).unwrap();
                         glib::ControlFlow::from(ok)
                     }));
                 }
@@ -163,12 +180,111 @@ async fn streamer(tx: Sender<Message>) {
             .build(),
     );
 
-    let main_loop = glib::MainLoop::new(None, false);
+    // Connect mouse events
+    let mouse_data: Arc<Mutex<MouseData>> = Arc::new(Mutex::new(MouseData {
+        mouse_down: false,
+        mouse_x: 0.0,
+        mouse_y: 0.0,
+    }));
+    let motion_controller = gtk::EventControllerMotion::new();
+    let dongle_tx_clone = dongle_tx.clone();
+    let data_weak = Arc::downgrade(&mouse_data);
+    motion_controller.connect_motion(move |_controller, x, y| {
+        println!("in connect_motion");
+        let Some(data) = data_weak.upgrade() else {
+            return;
+        };
+        let mut d = data.lock().unwrap();
+        if d.mouse_down {
+            d.mouse_x = (x / 1920.0) as f32;
+            d.mouse_y = (y / 1080.0) as f32;
+            let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Move);
+            dongle_tx_clone.try_send(Box::new(message)).unwrap();
+            println!("Mouse moved to ({}, {})", x, y);
+        }
+    });
+    let dongle_tx_clone = dongle_tx.clone();
+    let data_weak = Arc::downgrade(&mouse_data);
+    motion_controller.connect_leave(move |_controller| {
+        let Some(data) = data_weak.upgrade() else {
+            return;
+        };
+        let mut d = data.lock().unwrap();
+        d.mouse_down = false;
+        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
+        dongle_tx_clone.try_send(Box::new(message)).unwrap();
+        println!("Mouse left");
+    });
+    video_box.add_controller(motion_controller);
+    let click_controller = gtk::GestureClick::new();
+    let dongle_tx_clone = dongle_tx.clone();
+    let data_weak = Arc::downgrade(&mouse_data);
+    click_controller.connect_pressed(move |gesture, _n_press, x, y| {
+        println!("in connect_pressed");
+        let Some(data) = data_weak.upgrade() else {
+            return;
+        };
+        let mut d = data.lock().unwrap();
+        d.mouse_down = false;
+        d.mouse_x = (x / 1920.0) as f32;
+        d.mouse_y = (y / 1080.0) as f32;
+        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Down);
+        dongle_tx_clone.try_send(Box::new(message)).unwrap();
+        println!(
+            "Mouse button {} pressed at ({}, {})",
+            gesture.current_button(),
+            x,
+            y
+        );
+    });
+    let dongle_tx_clone = dongle_tx.clone();
+    let data_weak = Arc::downgrade(&mouse_data);
+    click_controller.connect_released(move |gesture, _n_press, x, y| {
+        println!("in connect_released");
+        let Some(data) = data_weak.upgrade() else {
+            return;
+        };
+        let mut d = data.lock().unwrap();
+        d.mouse_down = false;
+        d.mouse_x = (x / 1920.0) as f32;
+        d.mouse_y = (y / 1080.0) as f32;
+        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
+        dongle_tx_clone.try_send(Box::new(message)).unwrap();
+        println!(
+            "Mouse button {} released at ({}, {})",
+            gesture.current_button(),
+            x,
+            y
+        );
+    });
+    video_box.add_controller(click_controller);
+
     pipeline
         .set_state(gstreamer::State::Playing)
         .expect("Unable to set the pipeline to the `Playing` state.");
 
-    main_loop.run();
+    let app = Application::builder()
+        .application_id("com.example.Gtk4Gstreamer")
+        .build();
+
+    app.connect_activate(move |app| {
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title("GTK4 GStreamer Example")
+            .default_width(1920)
+            .default_height(1080)
+            .build();
+
+        window.set_child(Some(&video_box));
+        window.show();
+    });
+    app.run();
+}
+
+struct MouseData {
+    mouse_down: bool,
+    mouse_x: f32,
+    mouse_y: f32,
 }
 
 #[derive(Debug)]
@@ -176,21 +292,15 @@ struct CustomData {
     source_id: Option<SourceId>,
 
     appsrc: gstreamer_app::AppSrc,
-    appsink: gstreamer_app::AppSink,
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
 
 impl CustomData {
-    fn new(
-        appsrc: &gstreamer_app::AppSrc,
-        appsink: &gstreamer_app::AppSink,
-        tx: Sender<Message>,
-    ) -> CustomData {
+    fn new(appsrc: &gstreamer_app::AppSrc, tx: Sender<Message>) -> CustomData {
         CustomData {
             source_id: None,
             appsrc: appsrc.clone(),
-            appsink: appsink.clone(),
             tx: tx.clone(),
             rx: tx.subscribe(),
         }
