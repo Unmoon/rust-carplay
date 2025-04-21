@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use crate::driver::{DongleConfig, DongleDriver};
+use crate::driver::{DongleConfig, DongleDriver, read_loop, send_loop};
 use crate::message::Message;
 use futures::executor::block_on;
 use gstgtk4::PaintableSink;
 use gstreamer::prelude::{Cast, ElementExt, GstBinExtManual};
 use gstreamer::{ElementFactory, glib};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LockResult, Mutex, RwLock};
 use std::thread::sleep;
 use std::time::Duration;
 use test_log::env_logger;
@@ -16,10 +16,13 @@ use crate::readable::ReadableMessage;
 use crate::sendable::{SendTouch, SendableMessage, TouchAction};
 use gstreamer::glib::SourceId;
 use gstreamer_app::prelude::ObjectExt;
-use gtk::prelude::{ApplicationExt, ApplicationExtManual, BoxExt, GtkWindowExt, WidgetExt};
+use gtk::prelude::{
+    ApplicationExt, ApplicationExtManual, BoxExt, EventControllerExt, GestureDragExt, GestureExt,
+    GestureSingleExt, GtkWindowExt, WidgetExt,
+};
 use gtk::{Application, ApplicationWindow, Orientation};
-use log::info;
-use tokio::sync::mpsc;
+use log::{error, info};
+use tokio::sync::{mpsc, watch};
 
 mod commands;
 mod driver;
@@ -33,7 +36,7 @@ async fn setup_dongle(
     dongle_tx: mpsc::Sender<Box<dyn SendableMessage + Send>>,
     dongle_rx: mpsc::Receiver<Box<dyn SendableMessage + Send>>,
 ) {
-    let mut dongle = DongleDriver::new(dongle_tx, dongle_rx);
+    let mut dongle = DongleDriver::new();
     let config = DongleConfig {
         android_work_mode: Some(false),
         box_name: String::from("test"),
@@ -44,8 +47,14 @@ async fn setup_dongle(
         ..Default::default()
     };
     block_on(dongle.initialize()).unwrap();
-    block_on(dongle.start(config)).unwrap();
-    block_on(dongle.run(tx));
+    block_on(dongle.start(config, dongle_tx)).unwrap();
+    let in_ep = dongle.in_ep.unwrap().clone();
+    let out_ep = dongle.out_ep.unwrap().clone();
+    let interface = dongle.interface.unwrap();
+    tokio::spawn(read_loop(in_ep, interface.clone(), tx.clone()));
+    let rx_mutex = Arc::new(tokio::sync::Mutex::new(dongle_rx));
+    tokio::spawn(send_loop(out_ep, interface.clone(), rx_mutex.clone()));
+    // block_on(dongle.run(tx));
 }
 
 #[tokio::main]
@@ -53,11 +62,14 @@ pub async fn main() {
     env_logger::init();
 
     let (tx, _) = channel(64);
-    let (dongle_tx, dongle_rx) = mpsc::channel(32);
+    let (dongle_tx, dongle_rx) = mpsc::channel(64);
 
-    tokio::spawn(streamer(tx.clone(), dongle_tx.clone()));
+    let s = tokio::spawn(streamer(tx.clone(), dongle_tx.clone()));
 
-    setup_dongle(tx.clone(), dongle_tx, dongle_rx).await;
+    let d = tokio::spawn(setup_dongle(tx.clone(), dongle_tx.clone(), dongle_rx));
+
+    s.await.unwrap();
+    d.await.unwrap();
 }
 
 async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableMessage + Send>>) {
@@ -141,21 +153,18 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
 
                         let (appsrc, buffer) = {
                             let data = data.lock().unwrap();
-                            let mut buffer;
+                            let mut buffer = Default::default();
 
-                            loop {
-                                match rx.try_recv() {
-                                    Ok(Message::ReadVideoData(msg)) => {
-                                        buffer = gstreamer::Buffer::from_mut_slice(msg.get_data());
-                                        buffer
-                                            .get_mut()
-                                            .unwrap()
-                                            .set_pts(gstreamer::ClockTime::NONE);
-                                        break;
-                                    }
-                                    _ => {
-                                        sleep(Duration::from_secs_f32(0.01));
-                                    }
+                            match rx.try_recv() {
+                                Ok(Message::ReadVideoData(msg)) => {
+                                    buffer = gstreamer::Buffer::from_mut_slice(msg.get_data());
+                                    buffer
+                                        .get_mut()
+                                        .unwrap()
+                                        .set_pts(gstreamer::ClockTime::NONE);
+                                }
+                                _ => {
+                                    sleep(Duration::from_secs_f32(0.01));
                                 }
                             }
                             (data.appsrc.clone(), buffer)
@@ -179,68 +188,95 @@ async fn streamer(tx: Sender<Message>, dongle_tx: mpsc::Sender<Box<dyn SendableM
             .build(),
     );
 
-    // Connect mouse events
-    let mouse_data: Arc<Mutex<MouseData>> = Arc::new(Mutex::new(MouseData {
-        mouse_down: false,
-        mouse_x: 0.0,
-        mouse_y: 0.0,
-    }));
-    let motion_controller = gtk::EventControllerMotion::new();
+    let drag_controller = gtk::EventControllerMotion::new();
+    let mouse_down_main = Arc::new(RwLock::new(false));
+
     let dongle_tx_clone = dongle_tx.clone();
-    let data_weak = Arc::downgrade(&mouse_data);
-    motion_controller.connect_motion(move |_controller, x, y| {
-        let Some(data) = data_weak.upgrade() else {
-            return;
-        };
-        let mut d = data.lock().unwrap();
-        if d.mouse_down {
-            d.mouse_x = (x / 1920.0) as f32;
-            d.mouse_y = (y / 1080.0) as f32;
-            let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Move);
-            dongle_tx_clone.try_send(Box::new(message)).unwrap();
+    let mouse_down = mouse_down_main.clone();
+    drag_controller.connect_motion(move |_controller, x, y| {
+        if *mouse_down.read().unwrap() {
+            let x = (x / 1920.0) as f32;
+            let y = (y / 1080.0) as f32;
+            let message = SendTouch::new(x, y, TouchAction::Move);
+            let dongle_tx_clone = dongle_tx_clone.clone();
+            tokio::spawn(async move {
+                info!("Preparing send (move)");
+                match dongle_tx_clone.send(Box::new(message)).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Error sending TouchAction::Down {}", e)
+                    }
+                }
+            });
         }
     });
-    let dongle_tx_clone = dongle_tx.clone();
-    let data_weak = Arc::downgrade(&mouse_data);
-    motion_controller.connect_leave(move |_controller| {
-        info!("Moved");
-        let Some(data) = data_weak.upgrade() else {
-            return;
-        };
-        let mut d = data.lock().unwrap();
-        d.mouse_down = false;
-        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
-        dongle_tx_clone.try_send(Box::new(message)).unwrap();
-    });
-    video_box.add_controller(motion_controller);
+    video_box.add_controller(drag_controller);
+
     let click_controller = gtk::GestureClick::new();
     let dongle_tx_clone = dongle_tx.clone();
-    let data_weak = Arc::downgrade(&mouse_data);
+    let mouse_down = mouse_down_main.clone();
     click_controller.connect_pressed(move |_gesture, _n_press, x, y| {
         info!("Pressed");
-        let Some(data) = data_weak.upgrade() else {
-            return;
-        };
-        let mut d = data.lock().unwrap();
-        d.mouse_down = false;
-        d.mouse_x = (x / 1920.0) as f32;
-        d.mouse_y = (y / 1080.0) as f32;
-        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Down);
-        dongle_tx_clone.try_send(Box::new(message)).unwrap();
+        let mut m = mouse_down.write().unwrap();
+        *m = true;
+        drop(m);
+        let x = (x / 1920.0) as f32;
+        let y = (y / 1080.0) as f32;
+        let message = SendTouch::new(x, y, TouchAction::Down);
+
+        let dongle_tx_clone = dongle_tx_clone.clone();
+        tokio::spawn(async move {
+            info!("Preparing send (press)");
+            match dongle_tx_clone.send(Box::new(message)).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error sending TouchAction::Down {}", e)
+                }
+            }
+        });
     });
     let dongle_tx_clone = dongle_tx.clone();
-    let data_weak = Arc::downgrade(&mouse_data);
+    let mouse_down = mouse_down_main.clone();
     click_controller.connect_released(move |_gesture, _n_press, x, y| {
         info!("Released");
-        let Some(data) = data_weak.upgrade() else {
-            return;
-        };
-        let mut d = data.lock().unwrap();
-        d.mouse_down = false;
-        d.mouse_x = (x / 1920.0) as f32;
-        d.mouse_y = (y / 1080.0) as f32;
-        let message = SendTouch::new(d.mouse_x, d.mouse_y, TouchAction::Up);
-        dongle_tx_clone.try_send(Box::new(message)).unwrap();
+        let mut m = mouse_down.write().unwrap();
+        *m = false;
+        drop(m);
+        let x = (x / 1920.0) as f32;
+        let y = (y / 1080.0) as f32;
+        let dongle_tx_clone = dongle_tx_clone.clone();
+        let message = SendTouch::new(x, y, TouchAction::Up);
+        tokio::spawn(async move {
+            info!("Preparing send (release)");
+            match dongle_tx_clone.send(Box::new(message)).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error sending TouchAction::Up {}", e)
+                }
+            }
+        });
+    });
+    let dongle_tx_clone = dongle_tx.clone();
+    let mouse_down = mouse_down_main.clone();
+    click_controller.connect_end(move |_gesture, _seq| {
+        info!("Ended");
+        let mut m = mouse_down.write().unwrap();
+        *m = false;
+        drop(m);
+        let (x, y) = _gesture.point(_seq).unwrap();
+        let x = (x / 1920.0) as f32;
+        let y = (y / 1080.0) as f32;
+        let dongle_tx_clone = dongle_tx_clone.clone();
+        let message = SendTouch::new(x, y, TouchAction::Up);
+        tokio::spawn(async move {
+            info!("Preparing send (release)");
+            match dongle_tx_clone.send(Box::new(message)).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error sending TouchAction::Up {}", e)
+                }
+            }
+        });
     });
     video_box.add_controller(click_controller);
 

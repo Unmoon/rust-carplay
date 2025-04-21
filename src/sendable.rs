@@ -5,7 +5,7 @@ use crate::messagetypes::MessageType;
 use byteorder::{LittleEndian, WriteBytesExt};
 use futures::AsyncWriteExt;
 use futures_lite::future::block_on;
-use log::error;
+use log::{error, info};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,6 +85,7 @@ impl SendableMessage for SendTouch {
         MessageType::Touch
     }
     fn get_payload(&self) -> Vec<u8> {
+        info!("Sending with touch {:?}", self.action);
         let mut buf = Vec::with_capacity(16);
 
         // Action
