@@ -1,7 +1,7 @@
 use crate::commands::CommandMapping::*;
 use crate::message::{Message, MessageHeader};
 use crate::sendable::SendableMessage;
-use log::{error, info};
+use log::{error, info, warn};
 use nusb;
 use nusb::transfer::{Direction, RequestBuffer};
 use nusb::{Device, Interface};
@@ -175,38 +175,42 @@ impl DongleDriver {
     }
 
     pub async fn initialize(&mut self) -> Result<(), DriverError> {
-        // self.reset_usb().await;
+        self.reset_usb().await;
         let mut device_info = nusb::list_devices()?
             .find(|dev| dev.vendor_id() == 0x1314 && dev.product_id() == 0x1521);
         loop {
             if device_info.is_some() {
-                break;
+                match device_info.expect("Not found???").open() {
+                    Ok(device) => {
+                        device.set_configuration(1)?;
+                        let config = device.active_configuration().unwrap();
+                        let interface = config.interfaces().next().unwrap();
+
+                        let alt_settings = interface.alt_settings().next().unwrap();
+                        let in_endpoint = alt_settings
+                            .endpoints()
+                            .find(|e| e.direction() == Direction::In)
+                            .unwrap();
+                        let out_endpoint = alt_settings
+                            .endpoints()
+                            .find(|e| e.direction() == Direction::Out)
+                            .unwrap();
+
+                        self.interface =
+                            Some(device.claim_interface(interface.interface_number())?);
+                        self.device = Some(device.clone());
+                        self.in_ep = Some(in_endpoint.address());
+                        self.out_ep = Some(out_endpoint.address());
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Failed to connect to device, will retry. Error was: {}", e);
+                    }
+                }
             }
             device_info = nusb::list_devices()?
                 .find(|dev| dev.vendor_id() == 0x1314 && dev.product_id() == 0x1521);
         }
-        let device = device_info
-            .expect("Not found???")
-            .open()
-            .expect("Not found after reset");
-        device.set_configuration(1)?;
-        let config = device.active_configuration().unwrap();
-        let interface = config.interfaces().next().unwrap();
-
-        let alt_settings = interface.alt_settings().next().unwrap();
-        let in_endpoint = alt_settings
-            .endpoints()
-            .find(|e| e.direction() == Direction::In)
-            .unwrap();
-        let out_endpoint = alt_settings
-            .endpoints()
-            .find(|e| e.direction() == Direction::Out)
-            .unwrap();
-
-        self.interface = Some(device.claim_interface(interface.interface_number())?);
-        self.device = Some(device.clone());
-        self.in_ep = Some(in_endpoint.address());
-        self.out_ep = Some(out_endpoint.address());
 
         Ok(())
     }

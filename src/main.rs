@@ -60,7 +60,7 @@ async fn setup_dongle(
         width: 1920,
         height: 1080,
         fps: 60,
-        media_delay: 100,
+        media_delay: 200,
         ..Default::default()
     };
     block_on(dongle.initialize()).unwrap();
