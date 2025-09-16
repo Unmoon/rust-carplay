@@ -235,48 +235,48 @@ impl Unplugged {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AudioFormat {
-    pub frequency: u32,
-    pub channel: u8,
-    pub bitrate: u8,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bit_depth: u8,
 }
 
 lazy_static::lazy_static! {
     pub static ref DECODE_TYPE_MAP: HashMap<u32, AudioFormat> = {
         let mut m = HashMap::new();
         m.insert(1, AudioFormat {
-            frequency: 44100,
-            channel: 2,
-            bitrate: 16,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
         });
         m.insert(2, AudioFormat {
-            frequency: 44100,
-            channel: 2,
-            bitrate: 16,
+            sample_rate: 44100,
+            channels: 2,
+            bit_depth: 16,
         });
         m.insert(3, AudioFormat {
-            frequency: 8000,
-            channel: 1,
-            bitrate: 16,
+            sample_rate: 8000,
+            channels: 1,
+            bit_depth: 16,
         });
         m.insert(4, AudioFormat {
-            frequency: 48000,
-            channel: 2,
-            bitrate: 16,
+            sample_rate: 48000,
+            channels: 2,
+            bit_depth: 16,
         });
         m.insert(5, AudioFormat {
-            frequency: 16000,
-            channel: 1,
-            bitrate: 16,
+            sample_rate: 16000,
+            channels: 1,
+            bit_depth: 16,
         });
         m.insert(6, AudioFormat {
-            frequency: 24000,
-            channel: 1,
-            bitrate: 16,
+            sample_rate: 24000,
+            channels: 1,
+            bit_depth: 16,
         });
         m.insert(7, AudioFormat {
-            frequency: 16000,
-            channel: 2,
-            bitrate: 16,
+            sample_rate: 16000,
+            channels: 2,
+            bit_depth: 16,
         });
         m
     };
@@ -329,6 +329,10 @@ impl AudioData {
             audio_type,
             data,
         }
+    }
+
+    pub fn get_audio_format(&self) -> Option<&AudioFormat> {
+        DECODE_TYPE_MAP.get(&self.decode_type)
     }
 }
 
@@ -409,7 +413,7 @@ pub struct MediaData {
 impl ReadableMessage for MediaData {}
 impl MediaData {
     pub fn new(header: MessageHeader, data: Vec<u8>) -> Self {
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
         let data_len = data.len();
         // TODO: is 4 correct?
         let mut cursor = Cursor::new(data[..4].to_vec());

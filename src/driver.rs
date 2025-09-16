@@ -374,7 +374,7 @@ pub async fn read_loop(in_ep: u8, interface: Interface, message_tx: Sender<Messa
                         continue;
                     }
                 };
-                // info!("Received message {:?}", header);
+                info!("Received message {:?}", header);
 
                 let extra_data = if header.length > 0 {
                     match interface
