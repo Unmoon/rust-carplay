@@ -9,7 +9,7 @@ use futures::executor::block_on;
 use gstgtk4::PaintableSink;
 use gstreamer::prelude::ElementExt;
 use gstreamer::prelude::GstBinExtManual;
-use gstreamer::prelude::{Cast, GstObjectExt, PadExt};
+use gstreamer::prelude::{Cast, GstObjectExt};
 use gstreamer::ElementFactory;
 use gstreamer::{glib, MessageView};
 use std::sync::Arc;
@@ -449,15 +449,14 @@ fn video_streamer_and_gui(
         .expect("Unable to set the pipeline to the `Playing` state.");
 
     let app = Application::builder()
-        .application_id("com.example.Gtk4Gstreamer")
+        .application_id("com.unmoon.rustcarplay")
         .build();
 
     app.connect_activate(move |app| {
         let window = ApplicationWindow::builder()
             .application(app)
-            .title("GTK4 GStreamer Example")
-            .default_width(1920)
-            .default_height(1080)
+            .title("Rust CarPlay")
+            .fullscreened(true)
             .build();
 
         window.set_child(Some(&video_box));
