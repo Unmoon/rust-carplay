@@ -161,17 +161,22 @@ impl DongleDriver {
             .find(|dev| dev.vendor_id() == 0x1314 && dev.product_id() == 0x1521);
         loop {
             if device_info.is_some() {
-                break;
+                match device_info.expect("Device disappeared?").open() {
+                    Ok(device) => match device.reset() {
+                        Ok(_) => return,
+                        Err(e) => {
+                            warn!("Failed to reset device, will retry. Error was: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to open device, will retry. Error was: {}", e);
+                    }
+                }
             }
             device_info = nusb::list_devices()
                 .unwrap()
                 .find(|dev| dev.vendor_id() == 0x1314 && dev.product_id() == 0x1521);
         }
-        let device = device_info
-            .expect("Here we should have it")
-            .open()
-            .expect("Not found after reset");
-        device.reset().expect("Failed to reset");
     }
 
     pub async fn initialize(&mut self) -> Result<(), DriverError> {
@@ -180,7 +185,7 @@ impl DongleDriver {
             .find(|dev| dev.vendor_id() == 0x1314 && dev.product_id() == 0x1521);
         loop {
             if device_info.is_some() {
-                match device_info.expect("Not found???").open() {
+                match device_info.expect("Device disappeared?").open() {
                     Ok(device) => {
                         device.set_configuration(1)?;
                         let config = device.active_configuration().unwrap();
